@@ -1,0 +1,96 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Football Fam — docker-compose
+#
+# Starts PostgreSQL + the pipeline app.  For local development and
+# self-hosted deployments (Railway, Render, Fly.io, etc.).
+#
+# Quick start:
+#   cp .env.example .env          # fill in your API keys
+#   docker compose up -d db       # start just the database
+#   docker compose up              # start everything
+#
+# Run the pipeline manually:
+#   docker compose run --rm pipeline python scripts/run_all.py
+#
+# Run migrations:
+#   docker compose run --rm pipeline alembic upgrade head
+# ──────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── PostgreSQL database ──────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: football_fam
+      POSTGRES_PASSWORD: football_fam_dev
+      POSTGRES_DB: football_fam
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U football_fam"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── API server ───────────────────────────────────────────────────────
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://football_fam:football_fam_dev@db:5432/football_fam
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn src.api.app:app --host 0.0.0.0 --port 8000"
+
+  # ── Pipeline runner (on-demand or scheduled) ─────────────────────────
+  pipeline:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://football_fam:football_fam_dev@db:5432/football_fam
+    volumes:
+      - ./data:/app/data
+    profiles:
+      - pipeline
+    command: python scripts/run_all.py
+
+  # ── Cron scheduler (runs the pipeline on a schedule) ────────────────
+  scheduler:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://football_fam:football_fam_dev@db:5432/football_fam
+    volumes:
+      - ./data:/app/data
+    profiles:
+      - scheduler
+    entrypoint: >
+      sh -c "apt-get update && apt-get install -y --no-install-recommends cron &&
+             cp /app/crontab.txt /etc/cron.d/football-fam &&
+             sed -i 's|VENV_PYTHON=.*|VENV_PYTHON=/usr/local/bin/python|' /etc/cron.d/football-fam &&
+             sed -i 's|PIPELINE_DIR=.*|PIPELINE_DIR=/app|' /etc/cron.d/football-fam &&
+             sed -i 's|LOG_DIR=.*|LOG_DIR=/app/data/logs|' /etc/cron.d/football-fam &&
+             chmod 0644 /etc/cron.d/football-fam &&
+             crontab /etc/cron.d/football-fam &&
+             cron -f"
+
+volumes:
+  pgdata:

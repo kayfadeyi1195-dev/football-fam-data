@@ -1,0 +1,79 @@
+{
+  "leagues": [
+    {
+      "name": "National League",
+      "pyramid_step": 5,
+      "region": null,
+      "clubs": [
+        "Aldershot Town",
+        "Barnet",
+        "Boreham Wood",
+        "Bromley",
+        "Dag & Red",
+        "Dorking Wanderers",
+        "Eastleigh",
+        "Ebbsfleet United",
+        "Halifax Town",
+        "Hartlepool United",
+        "Maidenhead United",
+        "Oldham Athletic",
+        "Oxford City",
+        "Rochdale",
+        "Solihull Moors",
+        "Southend United",
+        "Sutton United",
+        "Wealdstone",
+        "Woking",
+        "York City"
+      ]
+    },
+    {
+      "name": "National League North",
+      "pyramid_step": 6,
+      "region": "North",
+      "clubs": [
+        "AFC Fylde",
+        "Banbury United",
+        "Boston United",
+        "Brackley Town",
+        "Chester",
+        "Curzon Ashton",
+        "Darlington",
+        "Farsley Celtic",
+        "Gateshead",
+        "Gloucester City",
+        "Hereford",
+        "Kidderminster Harriers",
+        "King's Lynn Town",
+        "Scarborough Athletic",
+        "Scunthorpe United",
+        "Southport",
+        "Spennymoor Town"
+      ]
+    },
+    {
+      "name": "National League South",
+      "pyramid_step": 6,
+      "region": "South",
+      "clubs": [
+        "Bath City",
+        "Braintree Town",
+        "Chelmsford City",
+        "Chippenham Town",
+        "Dartford",
+        "Dover Athletic",
+        "Dulwich Hamlet",
+        "Farnborough",
+        "Hampton & Richmond Borough",
+        "Havant & Waterlooville",
+        "Hemel Hempstead Town",
+        "Maidstone United",
+        "Slough Town",
+        "St Albans City",
+        "Tonbridge Angels",
+        "Welling United",
+        "Worthing"
+      ]
+    }
+  ]
+}

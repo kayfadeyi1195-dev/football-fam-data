@@ -1,0 +1,35 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Football Fam — scheduled pipeline jobs
+#
+# Install with:
+#   crontab crontab.txt
+#
+# Or, if you want to keep your existing crontab:
+#   crontab -l | cat - crontab.txt | crontab -
+#
+# Log files are written to data/logs/ by each script.
+# Adjust PIPELINE_DIR to match your deployment path.
+# ──────────────────────────────────────────────────────────────────────────
+
+SHELL=/bin/bash
+PIPELINE_DIR=/opt/football-fam-data
+VENV_PYTHON=/opt/football-fam-data/venv/bin/python
+LOG_DIR=/opt/football-fam-data/data/logs
+
+# ── Daily at 02:00 — API-only pipeline (no web scraping) ─────────────────
+0 2 * * * cd $PIPELINE_DIR && $VENV_PYTHON scripts/run_all.py --skip-scraping >> $LOG_DIR/cron_daily_api.log 2>&1
+
+# ── Weekly Sunday 03:00 — full pipeline (APIs + scrapers + ETL) ──────────
+0 3 * * 0 cd $PIPELINE_DIR && $VENV_PYTHON scripts/run_all.py >> $LOG_DIR/cron_weekly_full.log 2>&1
+
+# ── Daily at 06:00 — data quality report ─────────────────────────────────
+0 6 * * * cd $PIPELINE_DIR && $VENV_PYTHON scripts/data_quality_report.py >> $LOG_DIR/cron_quality.log 2>&1
+
+# ── Daily at 07:00 — entity resolution pass ──────────────────────────────
+0 7 * * * cd $PIPELINE_DIR && $VENV_PYTHON scripts/run_entity_resolution.py >> $LOG_DIR/cron_entity_res.log 2>&1
+
+# ── Daily at 07:30 — freshness & health monitor ─────────────────────────
+30 7 * * * cd $PIPELINE_DIR && $VENV_PYTHON scripts/monitor_freshness.py >> $LOG_DIR/cron_monitor.log 2>&1
+
+# ── Weekly Wednesday 04:00 — backfill clubs with 0 players ──────────────
+0 4 * * 3 cd $PIPELINE_DIR && $VENV_PYTHON scripts/backfill_gaps.py >> $LOG_DIR/cron_backfill.log 2>&1
