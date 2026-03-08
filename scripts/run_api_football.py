@@ -13,8 +13,10 @@ rather than creating duplicates.
 
 Usage::
 
-    python scripts/run_api_football.py               # full pipeline
-    python scripts/run_api_football.py --no-stats     # skip the slow per-player stats phase
+    python scripts/run_api_football.py                        # current season
+    python scripts/run_api_football.py --no-stats             # skip per-player stats
+    python scripts/run_api_football.py --season 2023          # 2023-24 season only
+    python scripts/run_api_football.py --seasons 2021,2022,2023  # multiple historical
 """
 
 import argparse
@@ -46,9 +48,13 @@ logger = logging.getLogger(__name__)
 # ── constants ────────────────────────────────────────────────────────────
 
 DATA_SOURCE = "api_football"
-API_SEASON = 2024            # API-Football uses the start year of a season
-SEASON_LABEL = "2024-25"     # Our internal season label
-FUZZY_THRESHOLD = 85         # Minimum similarity score (0-100) for name matching
+DEFAULT_API_SEASON = 2024
+FUZZY_THRESHOLD = 85
+
+
+def _season_label(api_year: int) -> str:
+    """Convert an API start-year to our ``'YYYY-YY'`` label."""
+    return f"{api_year}-{str(api_year + 1)[-2:]}"
 
 _POSITION_MAP: dict[str, str] = {
     "Goalkeeper": "GK",
@@ -157,6 +163,7 @@ def _build_player_id_lookup(session: Session) -> dict[str, int]:
 def phase_discover(
     session: Session,
     client: ApiFootballClient,
+    season_label: str,
 ) -> tuple[dict[str, int], dict[int, int]]:
     """Find non-league English competitions and map them to our leagues table.
 
@@ -179,10 +186,15 @@ def phase_discover(
             _stage_raw(session, "league", str(lid), entry)
     session.flush()
 
-    # Match API league names to our leagues table by fuzzy name
+    # Match API league names to our leagues table by fuzzy name.
+    # Try the requested season first; fall back to any season if
+    # the requested one doesn't exist yet (historical pulls).
     our_leagues = session.execute(
-        select(League).where(League.season == SEASON_LABEL)
+        select(League).where(League.season == season_label)
     ).scalars().all()
+    if not our_leagues:
+        our_leagues = session.execute(select(League)).scalars().all()
+
     our_league_names = [lg.name for lg in our_leagues]
     our_league_by_name = {lg.name: lg for lg in our_leagues}
 
@@ -219,6 +231,7 @@ def phase_match_clubs(
     session: Session,
     client: ApiFootballClient,
     api_league_map: dict[str, int],
+    api_season: int,
 ) -> tuple[dict[int, Club], dict[int, int]]:
     """Fetch teams from API, fuzzy-match to our clubs table, update records.
 
@@ -242,7 +255,7 @@ def phase_match_clubs(
 
     for league_name, api_league_id in sorted(api_league_map.items()):
         logger.info("Fetching teams for %s (api_id=%d)…", league_name, api_league_id)
-        teams = client.get_teams(api_league_id, API_SEASON)
+        teams = client.get_teams(api_league_id, api_season)
 
         for entry in teams:
             api_team = entry.get("team", {})
@@ -308,13 +321,21 @@ def phase_fetch_squads(
     client: ApiFootballClient,
     matched_clubs: dict[int, Club],
     team_to_api_league: dict[int, int],
+    *,
+    create_new: bool = True,
 ) -> dict[int, PlayerContext]:
     """Fetch squad rosters and upsert player records.
+
+    When *create_new* is ``False`` (historical season mode), unmatched
+    players are skipped instead of being created.  This prevents
+    polluting the database with players who may no longer be active.
 
     Returns:
         ``{api_player_id: {"player_id": …, "club_id": …, "api_league_id": …}}``
     """
     logger.info("═══ Phase 3: FETCH SQUADS ═══")
+    if not create_new:
+        logger.info("  (historical mode — will NOT create new players)")
 
     # Lookup from previous runs so we can skip re-matching
     prev_map = _build_player_id_lookup(session)
@@ -407,7 +428,14 @@ def phase_fetch_squads(
                     _stage_raw_player(session, api_pid, p, existing.id, club.id)
                     continue
 
-                # ── create new player ────────────────────────────────────
+                # ── create new player (only in current-season mode) ─────
+                if not create_new:
+                    logger.debug(
+                        "  Skipping unmatched %s (historical — no creation)",
+                        player_name,
+                    )
+                    continue
+
                 new_player = Player(
                     full_name=player_name,
                     position_primary=position_primary,
@@ -462,14 +490,16 @@ def phase_fetch_stats(
     api_players: dict[int, PlayerContext],
     matched_clubs: dict[int, Club],
     api_to_our_league: dict[int, int],
+    api_season: int,
+    season_label: str,
 ) -> int:
-    """Fetch per-player stats for the current season, upsert player_seasons.
+    """Fetch per-player stats for a given season, upsert player_seasons.
 
     Also enriches player records with detailed biographical data
     (name parts, DOB, nationality, height, weight) from the ``/players``
     endpoint.
     """
-    logger.info("═══ Phase 4: FETCH STATS ═══")
+    logger.info("═══ Phase 4: FETCH STATS (season %d / %s) ═══", api_season, season_label)
 
     total = len(api_players)
     est_minutes = total / 10 + 1
@@ -493,7 +523,7 @@ def phase_fetch_stats(
         if idx == 1 or idx % 25 == 0 or idx == total:
             logger.info("Stats progress: %d / %d (%.0f%%)", idx, total, idx / total * 100)
 
-        entries = client.get_player_stats(api_pid, API_SEASON, api_league_id)
+        entries = client.get_player_stats(api_pid, api_season, api_league_id)
         if not entries:
             continue
 
@@ -542,7 +572,7 @@ def phase_fetch_stats(
                     player_id=our_player_id,
                     club_id=club.id,
                     league_id=our_league_id,
-                    season=SEASON_LABEL,
+                    season=season_label,
                     appearances=_safe_int(games.get("appearences")),  # API typo
                     starts=_safe_int(games.get("lineups")),
                     sub_appearances=_safe_int(subs.get("in")),
@@ -624,21 +654,30 @@ def _complete_run(
 # main
 # ══════════════════════════════════════════════════════════════════════════
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="API-Football data pull for English non-league football",
-    )
-    parser.add_argument(
-        "--no-stats",
-        action="store_true",
-        help="Skip the (slow) per-player stats phase",
-    )
-    args = parser.parse_args()
+def run_season(
+    client: ApiFootballClient,
+    api_season: int,
+    *,
+    no_stats: bool = False,
+    historical: bool = False,
+) -> dict[str, Any]:
+    """Execute the full pipeline for a single season.
 
-    started = time.monotonic()
-    client = ApiFootballClient()
+    When *historical* is True, the squad phase will not create new
+    player records — it only matches against existing players and
+    adds ``player_seasons`` / ``player_career`` records for them.
 
-    # Counters for the summary
+    Returns a summary dict with counts and status.
+    """
+    season_label = _season_label(api_season)
+    logger.info("=" * 60)
+    logger.info(
+        "API-Football pull — season %d (%s)%s",
+        api_season, season_label,
+        "  [historical]" if historical else "",
+    )
+    logger.info("=" * 60)
+
     league_count = 0
     club_count = 0
     player_count = 0
@@ -647,11 +686,13 @@ def main() -> None:
 
     with get_session() as session:
         run = _start_run(session)
+        run.run_type = f"{'historical' if historical else 'full'}_pull_{season_label}"
         session.commit()
 
         try:
-            # Phase 1 — DISCOVER
-            api_league_map, api_to_our_league = phase_discover(session, client)
+            api_league_map, api_to_our_league = phase_discover(
+                session, client, season_label,
+            )
             league_count = len(api_league_map)
             if not api_league_map:
                 _complete_run(
@@ -659,11 +700,10 @@ def main() -> None:
                     status=RunStatus.FAILED,
                     error_log="No non-league competitions discovered",
                 )
-                return
+                return {"season": season_label, "status": "FAILED", "error": "no leagues"}
 
-            # Phase 2 — MATCH CLUBS
             matched_clubs, team_to_api_league = phase_match_clubs(
-                session, client, api_league_map,
+                session, client, api_league_map, api_season,
             )
             club_count = len(matched_clubs)
             if not matched_clubs:
@@ -672,24 +712,23 @@ def main() -> None:
                     status=RunStatus.FAILED,
                     error_log="No clubs matched between API and database",
                 )
-                return
+                return {"season": season_label, "status": "FAILED", "error": "no clubs"}
 
-            # Phase 3 — FETCH SQUADS
             api_players = phase_fetch_squads(
                 session, client, matched_clubs, team_to_api_league,
+                create_new=not historical,
             )
             player_count = len(api_players)
 
-            # Phase 4 — FETCH STATS
-            if args.no_stats:
+            if no_stats:
                 logger.info("═══ Phase 4: SKIPPED (--no-stats) ═══")
             else:
                 stats_count = phase_fetch_stats(
                     session, client, api_players,
                     matched_clubs, api_to_our_league,
+                    api_season, season_label,
                 )
 
-            # Phase 5 — complete run record
             _complete_run(
                 session, run,
                 records_fetched=player_count + club_count,
@@ -697,7 +736,7 @@ def main() -> None:
             )
 
         except Exception as exc:
-            logger.exception("Pipeline failed")
+            logger.exception("Pipeline failed for season %s", season_label)
             try:
                 _complete_run(
                     session, run,
@@ -708,21 +747,88 @@ def main() -> None:
                 logger.exception("Could not update run record after failure")
             error_occurred = True
 
+    return {
+        "season": season_label,
+        "api_season": api_season,
+        "leagues": league_count,
+        "clubs": club_count,
+        "players": player_count,
+        "stats": stats_count,
+        "status": "FAILED" if error_occurred else "OK",
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="API-Football data pull for English non-league football",
+    )
+    parser.add_argument(
+        "--no-stats",
+        action="store_true",
+        help="Skip the (slow) per-player stats phase",
+    )
+    parser.add_argument(
+        "--season",
+        type=int,
+        default=None,
+        help="Fetch a single season by start year (e.g. 2023 for 2023-24)",
+    )
+    parser.add_argument(
+        "--seasons",
+        type=str,
+        default=None,
+        help="Comma-separated start years (e.g. 2021,2022,2023)",
+    )
+    args = parser.parse_args()
+
+    # ── Determine which seasons to run ────────────────────────────
+    if args.seasons:
+        season_years = [int(y.strip()) for y in args.seasons.split(",")]
+    elif args.season is not None:
+        season_years = [args.season]
+    else:
+        season_years = [DEFAULT_API_SEASON]
+
+    started = time.monotonic()
+    client = ApiFootballClient()
+    results: list[dict[str, Any]] = []
+
+    for api_season in season_years:
+        historical = api_season != DEFAULT_API_SEASON
+        summary = run_season(
+            client, api_season,
+            no_stats=args.no_stats,
+            historical=historical,
+        )
+        results.append(summary)
+
     elapsed = time.monotonic() - started
 
+    # ── Print combined summary ────────────────────────────────────
     print()
     print("=" * 60)
     print("  API-Football Pipeline Summary")
     print("=" * 60)
-    print(f"  Leagues processed:       {league_count}")
-    print(f"  Clubs matched:           {club_count}")
-    print(f"  Players loaded:          {player_count}")
-    print(f"  Stats records upserted:  {stats_count}")
-    print(f"  Elapsed:                 {elapsed:.0f}s ({elapsed / 60:.1f} min)")
-    print(f"  Status:                  {'FAILED' if error_occurred else 'OK'}")
+
+    for r in results:
+        tag = "  [historical]" if r["api_season"] != DEFAULT_API_SEASON else ""
+        status = r["status"]
+        print(f"  Season {r['season']}{tag}:")
+        if status == "FAILED":
+            print(f"    Status:  FAILED — {r.get('error', '?')}")
+        else:
+            print(f"    Leagues:  {r.get('leagues', 0)}")
+            print(f"    Clubs:    {r.get('clubs', 0)}")
+            print(f"    Players:  {r.get('players', 0)}")
+            print(f"    Stats:    {r.get('stats', 0)}")
+            print(f"    Status:   OK")
+
+    print(f"\n  Total elapsed: {elapsed:.0f}s ({elapsed / 60:.1f} min)")
+    any_failed = any(r["status"] == "FAILED" for r in results)
+    print(f"  Overall:       {'SOME FAILED' if any_failed else 'ALL OK'}")
     print("=" * 60)
 
-    if error_occurred:
+    if any_failed:
         sys.exit(1)
 
 

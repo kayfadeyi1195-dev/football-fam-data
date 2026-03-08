@@ -89,6 +89,7 @@ SOURCE_STEPS: dict[str, set[int]] = {
     "pitchero":            {3, 4, 5},
     "fa_fulltime":         {4, 5, 6},
     "fbref":               {1, 2},
+    "transfermarkt":       {1, 2},
     "club_websites":       {3, 4, 5, 6},
 }
 
@@ -224,6 +225,41 @@ def _run_fbref() -> dict[str, Any]:
     return {"records": len(results)}
 
 
+# ── 6.5. Transfermarkt ─────────────────────────────────────────────────
+
+def _run_transfermarkt() -> dict[str, Any]:
+    from src.scrapers.transfermarkt import NONLEAGUE_COMPETITIONS, TransfermarktScraper
+    from src.etl.staging import stage_records
+
+    scraper = TransfermarktScraper()
+    total_clubs = 0
+    total_players = 0
+    total_staged = 0
+
+    for comp_id, comp_name in NONLEAGUE_COMPETITIONS.items():
+        log.info("Transfermarkt — %s (%s)", comp_name, comp_id)
+        try:
+            clubs = scraper.scrape_competition(comp_id)
+        except Exception:
+            log.warning("Transfermarkt — %s failed", comp_id, exc_info=True)
+            continue
+
+        total_clubs += len(clubs)
+        for club in clubs:
+            total_players += len(club.get("players", []))
+            total_staged += stage_records(
+                "transfermarkt", "club_squad", [club], id_field="id",
+            )
+
+    if total_staged == 0:
+        return {"skipped": True, "reason": "no data scraped"}
+    return {
+        "clubs": total_clubs,
+        "players": total_players,
+        "records_staged": total_staged,
+    }
+
+
 # ── 7. Club website scraper ─────────────────────────────────────────────
 
 def _run_club_websites() -> dict[str, Any]:
@@ -266,6 +302,7 @@ def _run_club_websites() -> dict[str, Any]:
 def _run_transforms() -> dict[str, Any]:
     from src.etl.pitchero_transform import transform_pitchero
     from src.etl.fa_fulltime_transform import transform_fa_fulltime
+    from src.etl.transfermarkt_transform import transform_transfermarkt
 
     pit = transform_pitchero()
     log.info("Pitchero transform: %s", pit)
@@ -273,7 +310,10 @@ def _run_transforms() -> dict[str, Any]:
     fa = transform_fa_fulltime()
     log.info("FA Full-Time transform: %s", fa)
 
-    return {"pitchero": pit, "fa_fulltime": fa}
+    tm = transform_transfermarkt()
+    log.info("Transfermarkt transform: %s", tm)
+
+    return {"pitchero": pit, "fa_fulltime": fa, "transfermarkt": tm}
 
 
 # ── 9. Entity resolution ────────────────────────────────────────────────
@@ -378,6 +418,8 @@ def _build_pipeline(args: argparse.Namespace) -> list[tuple[str, Callable]]:
         stages.append(("fa_fulltime", _run_fa_fulltime))
     if _want("fbref", is_scraper=True):
         stages.append(("fbref", _run_fbref))
+    if _want("transfermarkt", is_scraper=True):
+        stages.append(("transfermarkt", _run_transfermarkt))
     if _want("club_websites", is_scraper=True):
         stages.append(("club_websites", _run_club_websites))
 

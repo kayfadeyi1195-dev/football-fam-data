@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 """Orchestrate all scraping and enrichment in sequence with progress tracking.
 
-Runs five stages in order:
+Runs six stages in order:
 
   1. Pitchero scraper  → Pitchero ETL transform
   2. FA Full-Time scraper → FA Full-Time ETL transform
   3. FBref enrichment (Steps 1-2 via soccerdata)
-  4. Club website URL discovery
-  5. Club website squad scraper
+  4. Transfermarkt scraper → Transfermarkt ETL transform (Steps 1-2)
+  5. Club website URL discovery
+  6. Club website squad scraper
 
 After each stage, prints a progress snapshot showing total players,
 players per pyramid step, average confidence, and data sources.
@@ -46,6 +47,7 @@ SOURCE_STEPS: dict[str, set[int]] = {
     "pitchero":       {3, 4, 5},
     "fa_fulltime":    {4, 5, 6},
     "fbref":          {1, 2},
+    "transfermarkt":  {1, 2},
     "club_discovery": {1, 2, 3, 4, 5, 6},
     "club_websites":  {3, 4, 5, 6},
 }
@@ -377,6 +379,48 @@ def _stage_fbref() -> dict[str, Any]:
     }
 
 
+def _stage_transfermarkt_scrape() -> dict[str, Any]:
+    """Scrape Transfermarkt for Steps 1-3 non-league competitions."""
+    from src.scrapers.transfermarkt import NONLEAGUE_COMPETITIONS, TransfermarktScraper
+    from src.etl.staging import stage_records
+
+    scraper = TransfermarktScraper()
+    total_clubs = 0
+    total_players = 0
+    total_staged = 0
+
+    for comp_id, comp_name in NONLEAGUE_COMPETITIONS.items():
+        log.info("  Transfermarkt: %s (%s)", comp_name, comp_id)
+        try:
+            clubs = scraper.scrape_competition(comp_id)
+        except Exception as exc:
+            log.warning("  Transfermarkt: %s failed — %s", comp_id, exc)
+            continue
+
+        total_clubs += len(clubs)
+        for club in clubs:
+            players = club.get("players", [])
+            total_players += len(players)
+            total_staged += stage_records(
+                source="transfermarkt",
+                entity_type="club_squad",
+                records=[club],
+                id_field="id",
+            )
+
+    return {
+        "clubs": total_clubs,
+        "players": total_players,
+        "staged": total_staged,
+    }
+
+
+def _stage_transfermarkt_etl() -> dict[str, Any]:
+    """Run the Transfermarkt ETL transform on staged records."""
+    from src.etl.transfermarkt_transform import transform_transfermarkt
+    return transform_transfermarkt()
+
+
 def _stage_club_discovery() -> dict[str, Any]:
     """Discover website URLs for clubs with no URL."""
     from src.scrapers.club_websites import ClubWebsiteScraper
@@ -397,13 +441,15 @@ def _stage_club_websites_scrape() -> dict[str, Any]:
 # ══════════════════════════════════════════════════════════════════════════
 
 STAGES: list[tuple[str, str, Callable[[], dict[str, Any]]]] = [
-    ("pitchero_scrape",      "pitchero",       _stage_pitchero_scrape),
-    ("pitchero_etl",         "pitchero",       _stage_pitchero_etl),
-    ("fa_fulltime_scrape",   "fa_fulltime",    _stage_fa_fulltime_scrape),
-    ("fa_fulltime_etl",      "fa_fulltime",    _stage_fa_fulltime_etl),
-    ("fbref_enrichment",     "fbref",          _stage_fbref),
-    ("club_url_discovery",   "club_discovery", _stage_club_discovery),
-    ("club_website_scrape",  "club_websites",  _stage_club_websites_scrape),
+    ("pitchero_scrape",         "pitchero",       _stage_pitchero_scrape),
+    ("pitchero_etl",            "pitchero",       _stage_pitchero_etl),
+    ("fa_fulltime_scrape",      "fa_fulltime",    _stage_fa_fulltime_scrape),
+    ("fa_fulltime_etl",         "fa_fulltime",    _stage_fa_fulltime_etl),
+    ("fbref_enrichment",        "fbref",          _stage_fbref),
+    ("transfermarkt_scrape",    "transfermarkt",  _stage_transfermarkt_scrape),
+    ("transfermarkt_etl",       "transfermarkt",  _stage_transfermarkt_etl),
+    ("club_url_discovery",      "club_discovery", _stage_club_discovery),
+    ("club_website_scrape",     "club_websites",  _stage_club_websites_scrape),
 ]
 
 
