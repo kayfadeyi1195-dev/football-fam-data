@@ -26,7 +26,7 @@ Usage::
     scraper = TransfermarktScraper()
     clubs = scraper.scrape_competition("CNAT")
     profile = scraper.scrape_player_profile(player_id=123456)
-    stats = scraper.scrape_player_stats(player_id=123456, season=2024)
+    stats = scraper.scrape_player_stats(player_id=123456, season=2025)
     transfers = scraper.scrape_player_transfers(player_id=123456)
     mv_history = scraper.scrape_market_value_history(player_id=123456)
 
@@ -185,7 +185,7 @@ class TransfermarktScraper:
     def scrape_competition(
         self,
         comp_id: str,
-        season: int = 2024,
+        season: int = 2025,
     ) -> list[dict[str, Any]]:
         """Scrape all clubs and their squads for a competition.
 
@@ -256,7 +256,7 @@ class TransfermarktScraper:
     def scrape_club_squad(
         self,
         club_url: str,
-        season: int = 2024,
+        season: int = 2025,
     ) -> list[dict[str, Any]]:
         """Scrape the squad page for a single club."""
         m = re.search(r"/verein/(\d+)", club_url)

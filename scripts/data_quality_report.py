@@ -46,7 +46,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-CURRENT_SEASON = "2024-25"
+CURRENT_SEASON = "2025-26"
 
 EXPECTED_LEAGUES: dict[int, int] = {
     1: 1,

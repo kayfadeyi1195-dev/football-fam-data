@@ -34,7 +34,7 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
-CURRENT_SEASON = "2024-25"
+CURRENT_SEASON = "2025-26"
 
 
 @dataclass(frozen=True)

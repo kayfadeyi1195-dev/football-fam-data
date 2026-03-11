@@ -58,7 +58,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DATA_SOURCE = "fbref"
-SEASON_LABEL = "2024-25"
+SEASON_LABEL = "2025-26"
 FUZZY_THRESHOLD = 82
 
 # Entries we need in soccerdata's league_dict.json.
@@ -467,8 +467,8 @@ def main() -> None:
         description="Enrich player data from FBref via soccerdata",
     )
     parser.add_argument(
-        "--season", type=int, default=2024,
-        help="Season start year (e.g. 2024 for 2024-25). Default: 2024",
+        "--season", type=int, default=2025,
+        help="Season start year (e.g. 2025 for 2025-26). Default: 2025",
     )
     parser.add_argument(
         "--no-shooting", action="store_true",

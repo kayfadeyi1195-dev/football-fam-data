@@ -38,7 +38,7 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "data/uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 CLUB_FUZZY_THRESHOLD = 80
-CURRENT_SEASON = "2024-25"
+CURRENT_SEASON = "2025-26"
 DATA_SOURCE = "self_registration"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB

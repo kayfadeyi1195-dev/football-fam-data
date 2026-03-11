@@ -59,8 +59,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DATA_SOURCE = "api_football"
-API_SEASON = 2024
-SEASON_LABEL = "2024-25"
+API_SEASON = 2025
+SEASON_LABEL = "2025-26"
 FUZZY_THRESHOLD = 85
 
 PROGRESS_FILE = Path("data/match_fetch_progress.json")

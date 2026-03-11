@@ -53,7 +53,7 @@ from src.db.session import get_session
 logger = logging.getLogger(__name__)
 
 DATA_SOURCE = "transfermarkt"
-SEASON_LABEL = "2024-25"
+SEASON_LABEL = "2025-26"
 FUZZY_THRESHOLD = 85
 CONFIDENCE_SCORE = 4
 COMMIT_EVERY = 50

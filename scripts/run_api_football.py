@@ -13,10 +13,10 @@ rather than creating duplicates.
 
 Usage::
 
-    python scripts/run_api_football.py                        # current season
+    python scripts/run_api_football.py                        # current season (2025-26)
     python scripts/run_api_football.py --no-stats             # skip per-player stats
-    python scripts/run_api_football.py --season 2023          # 2023-24 season only
-    python scripts/run_api_football.py --seasons 2021,2022,2023  # multiple historical
+    python scripts/run_api_football.py --season 2024          # 2024-25 season only
+    python scripts/run_api_football.py --seasons 2023,2024    # multiple historical
 """
 
 import argparse
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # ── constants ────────────────────────────────────────────────────────────
 
 DATA_SOURCE = "api_football"
-DEFAULT_API_SEASON = 2024
+DEFAULT_API_SEASON = 2025
 FUZZY_THRESHOLD = 85
 
 
@@ -484,11 +484,13 @@ def _stage_raw_player(
 # Phase 4 — FETCH STATS
 # ══════════════════════════════════════════════════════════════════════════
 
+STATS_BATCH_SIZE = 25
+
+
 def phase_fetch_stats(
-    session: Session,
     client: ApiFootballClient,
     api_players: dict[int, PlayerContext],
-    matched_clubs: dict[int, Club],
+    club_id_map: dict[int, int],
     api_to_our_league: dict[int, int],
     api_season: int,
     season_label: str,
@@ -498,119 +500,142 @@ def phase_fetch_stats(
     Also enriches player records with detailed biographical data
     (name parts, DOB, nationality, height, weight) from the ``/players``
     endpoint.
+
+    To avoid Railway Postgres idle-connection timeouts, the function
+    opens a **fresh DB session for every batch of 25 API calls** instead
+    of holding a single session for the entire phase.  Each batch is
+    committed and closed before the next one begins.
     """
     logger.info("═══ Phase 4: FETCH STATS (season %d / %s) ═══", api_season, season_label)
 
-    total = len(api_players)
-    est_minutes = total / 10 + 1
-    logger.info(
-        "Fetching stats for %d players (est. %.0f min at 10 req/min)",
-        total, est_minutes,
-    )
-
-    stats_created = 0
+    # ── Build a deduplicated work list upfront (no DB needed) ─────────
     seen_our_ids: set[int] = set()
+    work_items: list[tuple[int, int, int]] = []  # (api_pid, our_player_id, api_league_id)
 
-    for idx, (api_pid, ctx) in enumerate(api_players.items(), 1):
+    for api_pid, ctx in api_players.items():
         our_player_id = ctx["player_id"]
-        api_league_id = ctx["api_league_id"]
-
-        # A player might appear via multiple squads with the same our_player_id
         if our_player_id in seen_our_ids:
             continue
         seen_our_ids.add(our_player_id)
+        work_items.append((api_pid, our_player_id, ctx["api_league_id"]))
 
-        if idx == 1 or idx % 25 == 0 or idx == total:
-            logger.info("Stats progress: %d / %d (%.0f%%)", idx, total, idx / total * 100)
+    total = len(work_items)
+    est_minutes = total / 10 + 1
+    logger.info(
+        "Fetching stats for %d players in batches of %d (est. %.0f min at 10 req/min)",
+        total, STATS_BATCH_SIZE, est_minutes,
+    )
 
-        entries = client.get_player_stats(api_pid, api_season, api_league_id)
-        if not entries:
+    stats_created = 0
+
+    # ── Process in batches of STATS_BATCH_SIZE ────────────────────────
+    for batch_start in range(0, total, STATS_BATCH_SIZE):
+        batch = work_items[batch_start : batch_start + STATS_BATCH_SIZE]
+        batch_end = batch_start + len(batch)
+
+        # Fetch all API responses for this batch *before* opening a session.
+        # This is where rate-limited waits happen — no DB connection held.
+        api_responses: list[tuple[int, int, int, list[dict]]] = []
+        for api_pid, our_player_id, api_league_id in batch:
+            idx = batch_start + len(api_responses) + 1
+            if idx == 1 or idx % 25 == 0 or idx == total:
+                logger.info("Stats progress: %d / %d (%.0f%%)", idx, total, idx / total * 100)
+
+            entries = client.get_player_stats(api_pid, api_season, api_league_id)
+            if entries:
+                api_responses.append((api_pid, our_player_id, api_league_id, entries))
+
+        if not api_responses:
             continue
 
-        for entry in entries:
-            player_info = entry.get("player", {})
-            statistics = entry.get("statistics", [])
+        # Now open a short-lived session to persist the batch.
+        with get_session() as session:
+            for api_pid, our_player_id, api_league_id, entries in api_responses:
+                for entry in entries:
+                    player_info = entry.get("player", {})
+                    statistics = entry.get("statistics", [])
 
-            # ── enrich player record with detailed bio ───────────────
-            player = session.get(Player, our_player_id)
-            if player:
-                birth = player_info.get("birth", {})
-                if not player.first_name and player_info.get("firstname"):
-                    player.first_name = player_info["firstname"]
-                if not player.last_name and player_info.get("lastname"):
-                    player.last_name = player_info["lastname"]
-                if not player.date_of_birth and birth.get("date"):
-                    player.date_of_birth = _parse_date(birth["date"])
-                if not player.nationality and player_info.get("nationality"):
-                    player.nationality = player_info["nationality"]
-                if not player.height_cm:
-                    player.height_cm = _parse_cm(player_info.get("height"))
-                if not player.weight_kg:
-                    player.weight_kg = _parse_kg(player_info.get("weight"))
-                if not player.profile_photo_url and player_info.get("photo"):
-                    player.profile_photo_url = player_info["photo"]
+                    # ── enrich player record with detailed bio ───────
+                    player = session.get(Player, our_player_id)
+                    if player:
+                        birth = player_info.get("birth", {})
+                        if not player.first_name and player_info.get("firstname"):
+                            player.first_name = player_info["firstname"]
+                        if not player.last_name and player_info.get("lastname"):
+                            player.last_name = player_info["lastname"]
+                        if not player.date_of_birth and birth.get("date"):
+                            player.date_of_birth = _parse_date(birth["date"])
+                        if not player.nationality and player_info.get("nationality"):
+                            player.nationality = player_info["nationality"]
+                        if not player.height_cm:
+                            player.height_cm = _parse_cm(player_info.get("height"))
+                        if not player.weight_kg:
+                            player.weight_kg = _parse_kg(player_info.get("weight"))
+                        if not player.profile_photo_url and player_info.get("photo"):
+                            player.profile_photo_url = player_info["photo"]
 
-            # ── create player_seasons for each stat block ────────────
-            for stat_block in statistics:
-                games = stat_block.get("games", {})
-                goals_data = stat_block.get("goals", {})
-                cards = stat_block.get("cards", {})
-                subs = stat_block.get("substitutes", {})
-                stat_team = stat_block.get("team", {})
-                stat_league = stat_block.get("league", {})
+                    # ── create player_seasons for each stat block ────
+                    for stat_block in statistics:
+                        games = stat_block.get("games", {})
+                        goals_data = stat_block.get("goals", {})
+                        cards = stat_block.get("cards", {})
+                        subs = stat_block.get("substitutes", {})
+                        stat_team = stat_block.get("team", {})
+                        stat_league = stat_block.get("league", {})
 
-                stat_team_id = stat_team.get("id")
-                club = matched_clubs.get(stat_team_id)
-                if not club:
-                    continue
+                        stat_team_id = stat_team.get("id")
+                        club_id = club_id_map.get(stat_team_id)
+                        if not club_id:
+                            continue
 
-                our_league_id = api_to_our_league.get(
-                    stat_league.get("id"), api_to_our_league.get(api_league_id),
-                )
+                        our_league_id = api_to_our_league.get(
+                            stat_league.get("id"), api_to_our_league.get(api_league_id),
+                        )
 
-                values = dict(
-                    player_id=our_player_id,
-                    club_id=club.id,
-                    league_id=our_league_id,
-                    season=season_label,
-                    appearances=_safe_int(games.get("appearences")),  # API typo
-                    starts=_safe_int(games.get("lineups")),
-                    sub_appearances=_safe_int(subs.get("in")),
-                    goals=_safe_int(goals_data.get("total")),
-                    assists=_safe_int(goals_data.get("assists")),
-                    yellow_cards=_safe_int(cards.get("yellow")),
-                    red_cards=_safe_int(cards.get("red")),
-                    minutes_played=_safe_int(games.get("minutes")),
-                    data_source=DATA_SOURCE,
-                    confidence_score=5,
-                )
+                        values = dict(
+                            player_id=our_player_id,
+                            club_id=club_id,
+                            league_id=our_league_id,
+                            season=season_label,
+                            appearances=_safe_int(games.get("appearences")),  # API typo
+                            starts=_safe_int(games.get("lineups")),
+                            sub_appearances=_safe_int(subs.get("in")),
+                            goals=_safe_int(goals_data.get("total")),
+                            assists=_safe_int(goals_data.get("assists")),
+                            yellow_cards=_safe_int(cards.get("yellow")),
+                            red_cards=_safe_int(cards.get("red")),
+                            minutes_played=_safe_int(games.get("minutes")),
+                            data_source=DATA_SOURCE,
+                            confidence_score=5,
+                        )
 
-                stmt = pg_insert(PlayerSeason).values(**values)
-                stmt = stmt.on_conflict_do_update(
-                    constraint="uq_player_club_season_source",
-                    set_={
-                        "league_id": stmt.excluded.league_id,
-                        "appearances": stmt.excluded.appearances,
-                        "starts": stmt.excluded.starts,
-                        "sub_appearances": stmt.excluded.sub_appearances,
-                        "goals": stmt.excluded.goals,
-                        "assists": stmt.excluded.assists,
-                        "yellow_cards": stmt.excluded.yellow_cards,
-                        "red_cards": stmt.excluded.red_cards,
-                        "minutes_played": stmt.excluded.minutes_played,
-                        "confidence_score": stmt.excluded.confidence_score,
-                        "updated_at": func.now(),
-                    },
-                )
-                session.execute(stmt)
-                stats_created += 1
+                        stmt = pg_insert(PlayerSeason).values(**values)
+                        stmt = stmt.on_conflict_do_update(
+                            constraint="uq_player_club_season_source",
+                            set_={
+                                "league_id": stmt.excluded.league_id,
+                                "appearances": stmt.excluded.appearances,
+                                "starts": stmt.excluded.starts,
+                                "sub_appearances": stmt.excluded.sub_appearances,
+                                "goals": stmt.excluded.goals,
+                                "assists": stmt.excluded.assists,
+                                "yellow_cards": stmt.excluded.yellow_cards,
+                                "red_cards": stmt.excluded.red_cards,
+                                "minutes_played": stmt.excluded.minutes_played,
+                                "confidence_score": stmt.excluded.confidence_score,
+                                "updated_at": func.now(),
+                            },
+                        )
+                        session.execute(stmt)
+                        stats_created += 1
 
-            _stage_raw(session, "player_stats", str(api_pid), entry)
+                    _stage_raw(session, "player_stats", str(api_pid), entry)
 
-        if idx % 50 == 0:
-            session.commit()
+        logger.info(
+            "Batch %d–%d committed (%d stats so far)",
+            batch_start + 1, batch_end, stats_created,
+        )
 
-    session.commit()
     logger.info("Stats phase complete: %d player_seasons records upserted", stats_created)
     return stats_created
 
@@ -723,9 +748,15 @@ def run_season(
             if no_stats:
                 logger.info("═══ Phase 4: SKIPPED (--no-stats) ═══")
             else:
+                # Extract plain club IDs before entering the batched stats
+                # phase, which manages its own short-lived sessions to avoid
+                # Railway Postgres idle-connection timeouts.
+                club_id_map = {api_tid: club.id for api_tid, club in matched_clubs.items()}
+                session.commit()
+
                 stats_count = phase_fetch_stats(
-                    session, client, api_players,
-                    matched_clubs, api_to_our_league,
+                    client, api_players,
+                    club_id_map, api_to_our_league,
                     api_season, season_label,
                 )
 

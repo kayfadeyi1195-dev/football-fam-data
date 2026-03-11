@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ── constants ────────────────────────────────────────────────────────────
 
 DATA_SOURCE = "pitchero"
-SEASON_LABEL = "2024-25"
+SEASON_LABEL = "2025-26"
 FUZZY_THRESHOLD = 90
 CONFIDENCE_SCORE = 3
 COMMIT_EVERY = 50

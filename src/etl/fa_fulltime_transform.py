@@ -48,7 +48,7 @@ from src.db.session import get_session
 logger = logging.getLogger(__name__)
 
 DATA_SOURCE = "fa_fulltime"
-SEASON_LABEL = "2024-25"
+SEASON_LABEL = "2025-26"
 FUZZY_THRESHOLD = 90
 CLUB_FUZZY_THRESHOLD = 80
 CONFIDENCE_SCORE = 3
