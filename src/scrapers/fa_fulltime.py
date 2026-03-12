@@ -698,6 +698,31 @@ class FAFullTimeScraper:
                 if not player_name:
                     continue
 
+                # Jersey numbers sometimes land in the name column.
+                # If the value is purely numeric, try adjacent cells
+                # for the real name before giving up.
+                if player_name.isdigit():
+                    recovered = False
+                    for offset in (1, -1):
+                        adj = pn_idx + offset
+                        if 0 <= adj < len(cells):
+                            candidate = cells[adj].get_text(strip=True)
+                            if candidate and not candidate.isdigit():
+                                logger.debug(
+                                    "Recovered name %r from adjacent cell "
+                                    "(was jersey %s)",
+                                    candidate, player_name,
+                                )
+                                player_name = candidate
+                                recovered = True
+                                break
+                    if not recovered:
+                        logger.debug(
+                            "Skipping purely numeric 'name' %s for team %s",
+                            player_name, team_name,
+                        )
+                        continue
+
                 # Count non-empty numbered columns as appearances
                 appearances = 0
                 goals = 0

@@ -23,7 +23,7 @@ Flags::
     --comp NLN6          Scrape a single competition ID only
     --enrich             Run enrichment mode instead of competition scrape
     --enrich-limit 200   Cap enrichment lookups (default: unlimited)
-    --step 1             Only enrich players at this pyramid step
+    --step 1,2           Only enrich players at these pyramid steps
     --stats              In competition mode, also scrape per-player stats
 """
 
@@ -236,12 +236,15 @@ def run_competitions(
 
 def run_enrichment(
     limit: int | None = None,
-    step_filter: int | None = None,
+    step_filter: set[int] | None = None,
 ) -> dict[str, Any]:
     """Search Transfermarkt for players missing key data and fill gaps.
 
     For each matched player, scrapes the full profile, per-season
     stats, transfer history, and market value timeline.
+
+    *step_filter* can be a set of step numbers (e.g. ``{1, 2}``) to
+    restrict enrichment to players at those pyramid levels.
     """
     scraper = TransfermarktScraper()
 
@@ -272,7 +275,7 @@ def run_enrichment(
                 query
                 .join(Club, Club.id == Player.current_club_id)
                 .join(League, League.id == Club.league_id)
-                .where(League.step == step_filter)
+                .where(League.step.in_(step_filter))
             )
 
         query = query.order_by(Player.full_name)
@@ -281,9 +284,10 @@ def run_enrichment(
         if limit:
             players = players[:limit]
 
+        steps_desc = ",".join(str(s) for s in sorted(step_filter)) if step_filter else "all"
         logger.info(
-            "Enrichment: %d players to search (limit=%s, step=%s)",
-            len(players), limit, step_filter,
+            "Enrichment: %d players to search (limit=%s, steps=%s)",
+            len(players), limit, steps_desc,
         )
 
         for i, player in enumerate(players, 1):
@@ -441,9 +445,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--step",
-        type=int,
+        type=str,
         default=None,
-        help="Only enrich players at this pyramid step",
+        help="Only enrich players at these pyramid steps (comma-separated, e.g. 1,2)",
     )
     parser.add_argument(
         "--stats",
@@ -455,7 +459,10 @@ def main() -> None:
     started = time.monotonic()
 
     if args.enrich:
-        summary = run_enrichment(limit=args.enrich_limit, step_filter=args.step)
+        step_filter = None
+        if args.step:
+            step_filter = {int(s.strip()) for s in args.step.split(",")}
+        summary = run_enrichment(limit=args.enrich_limit, step_filter=step_filter)
         elapsed = time.monotonic() - started
         tx = summary.get("transform", {})
 
