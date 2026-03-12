@@ -206,11 +206,39 @@ class ClubWebsiteScraper:
                         return candidate
         return None
 
+    _SKIP_DOMAINS = {
+        "google.com", "youtube.com", "facebook.com", "twitter.com",
+        "instagram.com", "wikipedia.org", "bbc.co.uk", "bbc.com",
+        "pitchero.com", "reddit.com", "linkedin.com", "duckduckgo.com",
+    }
+
+    def _extract_search_links(self, html: str) -> list[str]:
+        """Pull candidate URLs from search-engine HTML."""
+        soup = BeautifulSoup(html, "html.parser")
+        urls: list[str] = []
+        for a_tag in soup.find_all("a", href=True):
+            href: str = a_tag["href"]
+            # Google wraps links in /url?q=…
+            if href.startswith("/url?q="):
+                href = href.split("/url?q=")[1].split("&")[0]
+            # DuckDuckGo wraps links in //duckduckgo.com/l/?uddg=…
+            if "uddg=" in href:
+                from urllib.parse import unquote
+                href = unquote(href.split("uddg=")[1].split("&")[0])
+            if not href.startswith("http"):
+                continue
+            domain = urlparse(href).netloc.lower().lstrip("www.")
+            if any(skip in domain for skip in self._SKIP_DOMAINS):
+                continue
+            urls.append(href)
+        return urls
+
     def _try_google_search(self, name: str) -> str | None:
         """Search Google for the club and pick the best result.
 
-        We use Google's plain HTML search endpoint and parse the
-        result links.  This avoids needing an API key.
+        Returns ``None`` and sets ``_google_blocked`` if Google
+        returns 429 or a captcha page so the caller can fall back
+        to DuckDuckGo.
         """
         query = f"{name} football club official website"
         url = "https://www.google.com/search"
@@ -227,39 +255,83 @@ class ClubWebsiteScraper:
         except requests.RequestException:
             return None
 
+        if resp.status_code in {429, 503}:
+            logger.warning("Google blocked (HTTP %d) — will use DuckDuckGo fallback", resp.status_code)
+            self._google_blocked = True
+            return None
+
         if resp.status_code != 200:
             return None
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        skip_domains = {
-            "google.com", "youtube.com", "facebook.com", "twitter.com",
-            "instagram.com", "wikipedia.org", "bbc.co.uk", "bbc.com",
-            "pitchero.com", "reddit.com", "linkedin.com",
-        }
+        # Google sometimes returns 200 with a captcha page
+        if "captcha" in resp.text.lower() or "unusual traffic" in resp.text.lower():
+            logger.warning("Google captcha detected — will use DuckDuckGo fallback")
+            self._google_blocked = True
+            return None
 
-        for a_tag in soup.find_all("a", href=True):
-            href: str = a_tag["href"]
-            if href.startswith("/url?q="):
-                href = href.split("/url?q=")[1].split("&")[0]
-            if not href.startswith("http"):
-                continue
-
-            domain = urlparse(href).netloc.lower().lstrip("www.")
-            if any(skip in domain for skip in skip_domains):
-                continue
-
+        for href in self._extract_search_links(resp.text):
             if self._url_is_live(href):
                 logger.info("Google discovered %s → %s", name, href)
                 return href
 
         return None
 
-    def discover_urls(self, limit: int | None = None) -> dict[str, str]:
+    def _try_duckduckgo_search(self, name: str) -> str | None:
+        """Fallback search using DuckDuckGo's HTML-only interface."""
+        query = f"{name} football club official website"
+        url = "https://html.duckduckgo.com/html/"
+        headers = {"User-Agent": self._next_ua()}
+
+        self._throttle()
+        self._last_request_at = time.monotonic()
+
+        try:
+            resp = self._session.post(
+                url,
+                data={"q": query},
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.debug("DuckDuckGo request error: %s", exc)
+            return None
+
+        if resp.status_code != 200:
+            logger.debug("DuckDuckGo HTTP %d", resp.status_code)
+            return None
+
+        for href in self._extract_search_links(resp.text):
+            if self._url_is_live(href):
+                logger.info("DuckDuckGo discovered %s → %s", name, href)
+                return href
+
+        return None
+
+    def _search_for_url(self, name: str) -> str | None:
+        """Try Google first, fall back to DuckDuckGo if blocked."""
+        if not getattr(self, "_google_blocked", False):
+            result = self._try_google_search(name)
+            if result:
+                return result
+
+        return self._try_duckduckgo_search(name)
+
+    def discover_urls(
+        self,
+        limit: int | None = None,
+        step_filter: set[int] | None = None,
+    ) -> dict[str, str]:
         """Find website URLs for clubs that have ``website_url IS NULL``.
+
+        *step_filter* restricts discovery to clubs whose league is at
+        the given pyramid steps (e.g. ``{3, 4}``).
 
         Returns a mapping of club name → discovered URL and updates
         the ``clubs`` table in-place.
         """
+        from src.db.models import League
+
+        self._google_blocked = False
         discovered: dict[str, str] = {}
         attempted = 0
 
@@ -269,20 +341,30 @@ class ClubWebsiteScraper:
                 .where(Club.website_url.is_(None))
                 .where(Club.pitchero_url.is_(None))
                 .where(Club.is_active.is_(True))
-                .order_by(Club.id)
             )
+            if step_filter:
+                query = (
+                    query
+                    .join(League, League.id == Club.league_id)
+                    .where(League.step.in_(step_filter))
+                )
+            query = query.order_by(Club.id)
             if limit:
                 query = query.limit(limit)
             clubs = session.execute(query).scalars().all()
 
-            logger.info("URL discovery: %d clubs without website_url", len(clubs))
+            steps_desc = ",".join(str(s) for s in sorted(step_filter)) if step_filter else "all"
+            logger.info(
+                "URL discovery: %d clubs without website_url (steps=%s)",
+                len(clubs), steps_desc,
+            )
 
             for club in clubs:
                 attempted += 1
                 url = self._try_candidate_urls(club.name)
 
                 if url is None:
-                    url = self._try_google_search(club.name)
+                    url = self._search_for_url(club.name)
 
                 if url:
                     club.website_url = url
@@ -717,7 +799,15 @@ if __name__ == "__main__":
         "--limit", type=int, default=None,
         help="Max clubs to process (for testing)",
     )
+    parser.add_argument(
+        "--step", type=str, default=None,
+        help="Only discover URLs for these pyramid steps (comma-separated, e.g. 3,4)",
+    )
     args = parser.parse_args()
+
+    step_filter = None
+    if args.step:
+        step_filter = {int(s.strip()) for s in args.step.split(",")}
 
     run_both = not args.discover and not args.scrape
 
@@ -725,7 +815,7 @@ if __name__ == "__main__":
 
     if args.discover or run_both:
         print("\n── URL DISCOVERY ─────────────────────────────────")
-        urls = scraper.discover_urls(limit=args.limit)
+        urls = scraper.discover_urls(limit=args.limit, step_filter=step_filter)
         print(f"  Discovered {len(urls)} URLs")
         for name, url in list(urls.items())[:20]:
             print(f"    {name:<40s}  {url}")
